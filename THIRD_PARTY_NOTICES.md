@@ -11,4 +11,6 @@ Creality K2 Plus Console Logger uses third-party Python software. Copyright and 
 
 The source repository declares direct dependencies in `requirements.txt`. The Windows executable may also contain runtime/transitive dependencies required by these packages. Their respective upstream license terms continue to apply.
 
-This notice is not a license grant for the FDM AI Lab project itself. A project license has not been selected for V2.3.0.
+## Project license
+
+The FDM AI Lab project itself is published **without a project LICENSE file** for V2.3.0. This notice does not create a project-wide license grant. Third-party components remain subject to their respective licenses above.
