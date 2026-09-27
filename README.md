@@ -21,15 +21,22 @@ SFTP is not used.
 
 Backup is read-only on the printer. The resulting ZIP may contain sensitive printer configuration and must be kept private unless separately sanitized.
 
+## Documentation
+
+- [README_RU.md](README_RU.md) — полное руководство пользователя на русском;
+- [README_ENG.md](README_ENG.md) — full English user manual;
+- [SECURITY.md](SECURITY.md) — security and privacy notes;
+- [CHANGELOG.md](CHANGELOG.md) — version history;
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — third-party software notices.
+
+The original DOCX manuals are preparation sources and are not published in the repository.
+
 ## Distribution
 
-The public repository contains Python source and Markdown documentation. The Windows EXE is published as a release asset.
+The public repository contains Python source and Markdown documentation. The Windows EXE is published as a Release asset.
 
 The internal build/compilation block is intentionally not part of the public repository.
 
-Documentation:
-- `README_RU.md` — Russian;
-- `README_EN.md` — English;
-- `SECURITY.md`;
-- `CHANGELOG.md`;
-- `THIRD_PARTY_NOTICES.md`.
+## Project license
+
+No project LICENSE is provided. Third-party components remain subject to their own licenses listed in `THIRD_PARTY_NOTICES.md`.
