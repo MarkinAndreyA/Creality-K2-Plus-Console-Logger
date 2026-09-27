@@ -349,3 +349,353 @@ def ssh_backup_inventory(client, root: str, cancel: threading.Event,
     parts = line.split("|")
     if len(parts) != 3:
         raise RuntimeError(f"Unexpected inventory response: {line!r}")
+    files, dirs, kib = (int((x or "0").strip()) for x in parts)
+    estimate = max(0, kib) * 1024
+    if files > MAX_BACKUP_FILES:
+        raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_FILES} files")
+    if dirs > MAX_BACKUP_DIRS:
+        raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_DIRS} directories")
+    if estimate > MAX_BACKUP_BYTES:
+        raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_BYTES // (1024*1024)} MiB")
+    return {"files": files, "dirs": dirs, "bytes_estimate": estimate}
+
+
+def make_tar_command(root: str) -> str:
+    root = validate_backup_root(root)
+    parent, base = root.rsplit("/", 1)
+    parent = parent or "/"
+    qp, qb = shlex.quote(parent), shlex.quote(base)
+    return (
+        "if command -v tar >/dev/null 2>&1; then "
+        f"exec tar -C {qp} -cf - {qb}; "
+        "elif command -v busybox >/dev/null 2>&1; then "
+        f"exec busybox tar -C {qp} -cf - {qb}; "
+        "else echo 'tar/busybox not found' >&2; exit 127; fi"
+    )
+
+
+class SSHChannelReader:
+    def __init__(self, channel, cancel: threading.Event, idle_timeout: float = BACKUP_IDLE_TIMEOUT):
+        self.channel = channel
+        self.cancel = cancel
+        self.idle_timeout = float(idle_timeout)
+        self.stderr = bytearray()
+        self.bytes_received = 0
+        self.last_activity = time.monotonic()
+
+    def _drain_stderr(self) -> None:
+        while self.channel.recv_stderr_ready():
+            chunk = self.channel.recv_stderr(65536)
+            if not chunk:
+                break
+            self.stderr.extend(chunk)
+            self.last_activity = time.monotonic()
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = 65536
+        out = bytearray()
+        while len(out) < size:
+            if self.cancel.is_set():
+                raise BackupCancelled("Backup cancelled")
+            self._drain_stderr()
+            if self.channel.recv_ready():
+                chunk = self.channel.recv(min(65536, size - len(out)))
+                if chunk:
+                    out.extend(chunk)
+                    self.bytes_received += len(chunk)
+                    self.last_activity = time.monotonic()
+                    continue
+            if self.channel.exit_status_ready() and not self.channel.recv_ready():
+                break
+            if time.monotonic() - self.last_activity > self.idle_timeout:
+                raise TimeoutError(f"SSH TAR stream stalled for {self.idle_timeout:.0f} s")
+            time.sleep(0.02)
+        return bytes(out)
+
+    def close(self) -> None:
+        pass
+
+
+def wait_ssh_channel_exit(channel, cancel: threading.Event, reader: SSHChannelReader | None = None,
+                          idle_timeout: float = BACKUP_IDLE_TIMEOUT) -> tuple[int, str]:
+    last = time.monotonic()
+    while not channel.exit_status_ready():
+        if cancel.is_set():
+            raise BackupCancelled("Backup cancelled")
+        moved = False
+        if reader is not None:
+            before = len(reader.stderr)
+            reader._drain_stderr()
+            moved = len(reader.stderr) != before
+        if moved:
+            last = time.monotonic()
+        if time.monotonic() - last > idle_timeout:
+            raise TimeoutError(f"SSH command did not terminate for {idle_timeout:.0f} s")
+        time.sleep(0.03)
+    if reader is not None:
+        reader._drain_stderr()
+        stderr = reader.stderr.decode("utf-8", "replace").strip()
+    else:
+        stderr = ""
+    return channel.recv_exit_status(), stderr
+
+
+def _safe_tar_member_relative(name: str, expected_root_name: str) -> str | None:
+    name = (name or "").replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    if name.startswith("/"):
+        raise RuntimeError(f"Unsafe absolute TAR member: {name}")
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise RuntimeError(f"Unsafe TAR traversal member: {name}")
+    if not parts:
+        return None
+    if parts[0] != expected_root_name:
+        raise RuntimeError(f"Unexpected TAR root member: {name}")
+    rel = "/".join(parts[1:])
+    return rel or None
+
+
+def create_config_backup_from_tar(fileobj, root: str, partial_path: Path, printer_name: str,
+                                  cancel: threading.Event, estimate: dict[str, int] | None = None,
+                                  progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    root = validate_backup_root(root).rstrip("/")
+    root_name = root.rsplit("/", 1)[-1]
+    estimate = estimate or {}
+    estimate_bytes = int(estimate.get("bytes_estimate", 0))
+    estimate_files = int(estimate.get("files", 0))
+    files_meta: list[dict[str, Any]] = []
+    symlinks: list[dict[str, str]] = []
+    copied = 0
+    dirs = 0
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.unlink(missing_ok=True)
+    if cancel.is_set():
+        raise BackupCancelled("Backup cancelled")
+    try:
+        with zipfile.ZipFile(partial_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
+            with tarfile.open(fileobj=fileobj, mode="r|*") as tf:
+                for member in tf:
+                    if cancel.is_set():
+                        raise BackupCancelled("Backup cancelled")
+                    rel = _safe_tar_member_relative(member.name, root_name)
+                    if member.isdir():
+                        dirs += 1
+                        if dirs > MAX_BACKUP_DIRS:
+                            raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_DIRS} directories")
+                        continue
+                    if rel is None:
+                        continue
+                    if member.issym() or member.islnk():
+                        symlinks.append({"path": rel, "target": member.linkname or ""})
+                        continue
+                    if not member.isfile():
+                        continue
+                    size = int(member.size or 0)
+                    if len(files_meta) + 1 > MAX_BACKUP_FILES:
+                        raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_FILES} files")
+                    if copied + size > MAX_BACKUP_BYTES:
+                        raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_BYTES // (1024*1024)} MiB")
+                    src = tf.extractfile(member)
+                    if src is None:
+                        raise RuntimeError(f"Unable to read TAR member: {member.name}")
+                    arc = f"config/{rel}"
+                    with src, zf.open(arc, "w") as dst:
+                        file_written = 0
+                        while True:
+                            if cancel.is_set():
+                                raise BackupCancelled("Backup cancelled")
+                            chunk = src.read(256 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                            file_written += len(chunk)
+                            copied += len(chunk)
+                            if copied > MAX_BACKUP_BYTES:
+                                raise RuntimeError(f"Backup safety limit exceeded: more than {MAX_BACKUP_BYTES // (1024*1024)} MiB")
+                            if progress:
+                                progress({"phase": "copy", "index": len(files_meta) + 1,
+                                          "file_count": estimate_files, "file": rel,
+                                          "copied": copied, "bytes_total": estimate_bytes,
+                                          "file_size": size})
+                    if file_written != size:
+                        raise RuntimeError(f"Incomplete TAR member: {member.name} ({file_written}/{size} bytes)")
+                    files_meta.append({"path": rel, "size": size})
+            manifest: dict[str, Any] = {
+                "application": APP_NAME, "version": VERSION, "created": now_local().isoformat(),
+                "printer_name": sanitize_name(printer_name), "source_root": root,
+                "transport": "ssh_tar_stream", "files": files_meta, "symlinks": symlinks,
+            }
+            zf.writestr("FDM_AI_LAB_BACKUP_MANIFEST.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        return {"root": root, "files": len(files_meta), "symlinks": len(symlinks), "bytes": copied,
+                "partial": str(partial_path)}
+    except Exception:
+        partial_path.unlink(missing_ok=True)
+        raise
+
+
+def verify_and_finalize_backup(partial_path: Path, final_path: Path,
+                               progress: Callable[[dict[str, Any]], None] | None = None) -> None:
+    if progress:
+        progress({"phase": "stage", "stage": "verify", "output": str(partial_path)})
+    with zipfile.ZipFile(partial_path, "r") as verify_zip:
+        bad = verify_zip.testzip()
+        if bad is not None:
+            raise RuntimeError(f"ZIP verification failed at member: {bad}")
+        if "FDM_AI_LAB_BACKUP_MANIFEST.json" not in verify_zip.namelist():
+            raise RuntimeError("ZIP verification failed: backup manifest is missing")
+    os.replace(partial_path, final_path)
+
+
+def generate_rsa_key(private_path: Path, bits: int = 3072) -> tuple[Path, Path]:
+    if paramiko is None:
+        raise RuntimeError("paramiko is not installed")
+    private_path.parent.mkdir(parents=True, exist_ok=True)
+    if private_path.exists():
+        raise FileExistsError(str(private_path))
+    key = paramiko.RSAKey.generate(bits=bits)
+    key.write_private_key_file(str(private_path))
+    public_path = Path(str(private_path) + ".pub")
+    public_path.write_text(f"{key.get_name()} {key.get_base64()} fdm-ai-lab-k2-plus\n", encoding="ascii")
+    return private_path, public_path
+
+
+def install_public_key(host: str, port: int, username: str, password: str, public_key_file: Path) -> str:
+    if not password:
+        raise ValueError("A password is required for first-time key installation")
+    pub = public_key_file.read_text(encoding="ascii").strip()
+    client = ssh_connect(host, port, username, password)
+    try:
+        rc, home, err = ssh_exec_text(client, 'printf "%s" "$HOME"')
+        if rc != 0 or not home.strip():
+            raise RuntimeError(err or "Unable to detect remote HOME")
+        home = home.strip()
+        qpub = shlex.quote(pub)
+        command = (
+            'umask 077; mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; '
+            'chmod 700 "$HOME/.ssh"; chmod 600 "$HOME/.ssh/authorized_keys"; '
+            f'grep -qxF -- {qpub} "$HOME/.ssh/authorized_keys" 2>/dev/null || '
+            f'printf "%s\\n" {qpub} >> "$HOME/.ssh/authorized_keys"'
+        )
+        rc, _out, err = ssh_exec_text(client, command, timeout=SSH_IO_TIMEOUT)
+        if rc != 0:
+            raise RuntimeError(err or "Unable to update authorized_keys")
+        return home
+    finally:
+        client.close()
+
+
+class ConsoleLoggerThread(threading.Thread):
+    def __init__(self, host: str, port: int, output_file: Path, ui_queue: queue.Queue, stop_event: threading.Event):
+        super().__init__(daemon=True)
+        self.host, self.port, self.output_file, self.ui_queue, self.stop_event = host, int(port), output_file, ui_queue, stop_event
+        self.seen: set[str] = set()
+
+    def emit(self, kind: str, text: str) -> None:
+        self.ui_queue.put(("console", kind, text))
+
+    def run(self) -> None:
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            initial = http_json(self.host, self.port, "/server/gcode_store?count=1000", timeout=5)
+            for x in extract_store(initial):
+                self.seen.add(record_key(x))
+        except Exception as e:
+            self.emit("system", f"LOGGER_INITIAL_HISTORY_WARNING: {e}")
+        self.emit("system", f"LOGGER_START VERSION={VERSION}")
+        try:
+            with self.output_file.open("a", encoding="utf-8", buffering=1) as f:
+                while not self.stop_event.is_set():
+                    ts = now_local()
+                    try:
+                        store = http_json(self.host, self.port, "/server/gcode_store?count=1000", timeout=5)
+                        for x in extract_store(store):
+                            k = record_key(x)
+                            if k in self.seen:
+                                continue
+                            self.seen.add(k)
+                            line = f"{ts.isoformat()}  {record_text(x)}"
+                            f.write(line + "\n")
+                            self.emit("console", line)
+                    except Exception as e:
+                        self.emit("error", f"LOGGER_POLL_ERROR: {e}")
+                    self.stop_event.wait(POLL_SECONDS)
+        except Exception as e:
+            self.emit("error", f"LOGGER_FATAL: {e}")
+        finally:
+            self.emit("system", "LOGGER_STOP")
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"FDM AI Lab — K2 Plus Console Logger V{VERSION}")
+        self.root.geometry("1320x860")
+        self.root.minsize(1080, 720)
+        self.settings = load_settings()
+        self.lang = tk.StringVar(value=self.settings.get("language", "ru") if self.settings.get("language", "ru") in I18N else "ru")
+        self.ui_queue: queue.Queue = queue.Queue()
+        self.logger_thread: ConsoleLoggerThread | None = None
+        self.logger_stop = threading.Event()
+        self.log_started_at: dt.datetime | None = None
+        self.console_started_at = now_local()
+        self._last_auto_log_name = ""
+        self.backup_cancel = threading.Event()
+        self.backup_running = False
+        self.backup_client = None
+        self.backup_channel = None
+        self.backup_run_id = 0
+        self._bindings: list[tuple[Any, str]] = []
+        self._build_vars()
+        self._build_ui()
+        self._apply_language()
+        self._refresh_auto_log_name(True)
+        self._poll_ui_queue()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def t(self, key: str) -> str:
+        return I18N[self.lang.get()].get(key, key)
+
+    def _build_vars(self):
+        home = Path.home()
+        self.printer_name = tk.StringVar(value=self.settings.get("printer_name", DEFAULT_PRINTER_NAME))
+        self.remember_connection = tk.BooleanVar(value=bool(self.settings.get("remember_connection", False)))
+        remembered = self.remember_connection.get()
+        self.host = tk.StringVar(value=self.settings.get("host", "") if remembered else "")
+        self.moonraker_port = tk.StringVar(value=str(self.settings.get("moonraker_port", DEFAULT_MOONRAKER_PORT) if remembered else DEFAULT_MOONRAKER_PORT))
+        self.ssh_port = tk.StringVar(value=str(self.settings.get("ssh_port", DEFAULT_SSH_PORT) if remembered else DEFAULT_SSH_PORT))
+        self.ssh_user = tk.StringVar(value=self.settings.get("ssh_user", DEFAULT_USER) if remembered else DEFAULT_USER)
+        self.ssh_password = tk.StringVar(value=DEFAULT_PASSWORD)
+        self.show_password = tk.BooleanVar(value=False)
+        self.key_path = tk.StringVar(value=self.settings.get("key_path", "") if remembered else "")
+        self.log_folder = tk.StringVar(value=self.settings.get("log_folder") or str(home / "Documents" / "FDM_AI_Lab" / "K2_Console_Logs"))
+        self.log_name = tk.StringVar(value="")
+        self.backup_folder = tk.StringVar(value=self.settings.get("backup_folder") or str(home / "Documents" / "FDM_AI_Lab" / "K2_Backups"))
+        self.config_path = tk.StringVar(value=self.settings.get("config_path") or CANONICAL_CONFIG_ROOT)
+        self.key_folder = tk.StringVar(value=self.settings.get("key_folder") or str(home / ".ssh"))
+        self.key_name = tk.StringVar(value=self.settings.get("key_name", "fdm_ai_lab_k2_plus"))
+        self.moonraker_status = tk.StringVar(value="")
+        self.ssh_status = tk.StringVar(value="")
+        self.logger_status = tk.StringVar(value="")
+        self.footer_status = tk.StringVar(value="")
+        self.backup_status = tk.StringVar(value="")
+
+    def _section(self, parent, row: int, col: int, title_key: str, colspan: int = 1):
+        frame = ctk.CTkFrame(parent, corner_radius=8)
+        frame.grid(row=row, column=col, columnspan=colspan, padx=8, pady=8, sticky="nsew")
+        frame.grid_columnconfigure(1, weight=1)
+        title = ctk.CTkLabel(frame, text="", font=ctk.CTkFont(size=14, weight="bold"), anchor="w")
+        title.grid(row=0, column=0, columnspan=3, padx=12, pady=(10, 5), sticky="ew")
+        self._bindings.append((title, title_key))
+        return frame
+
+    def _field(self, parent, row: int, label_key: str, var: tk.StringVar, browse: Callable | None = None,
+               show: str | None = None, hint: str | None = None):
+        label = ctk.CTkLabel(parent, text="", anchor="w")
+        label.grid(row=row, column=0, padx=(12, 8), pady=5, sticky="w")
+        self._bindings.append((label, label_key))
+        ent = ctk.CTkEntry(parent, textvariable=var, show=show or "", height=30)
+        ent.grid(row=row, column=1, padx=4, pady=5, sticky="ew")
+        if browse:
