@@ -1199,3 +1199,129 @@ class App:
             if run_id != self.backup_run_id:
                 return False
             self.backup_client = None; self.backup_channel = None
+            self._release_backup_ui()
+            return True
+
+        def done(res):
+            if not finish_ui():
+                return
+            self.backup_progress.set(1)
+            self.backup_status.set(f"{self.t('backup_done')}: {res['files']} files / {res['bytes']/1024:.1f} KiB")
+            self._append_console(f"CONFIG_BACKUP=PASS TRANSPORT=SSH_TAR FILES={res['files']} SYMLINKS={res['symlinks']} BYTES={res['bytes']} SOURCE={res['root']} OUTPUT={res['output']}", "system")
+            self.footer_status.set(f"{self.t('backup_done')}: {res['output']}")
+            messagebox.showinfo(self.t("success"), f"{self.t('backup_done')}\n{res['output']}", parent=self.root)
+
+        def fail(e):
+            partial.unlink(missing_ok=True)
+            if run_id != self.backup_run_id:
+                return
+            finish_ui(); self.backup_progress.set(0)
+            if isinstance(e, BackupCancelled) or cancel_event.is_set():
+                self.backup_status.set(self.t("backup_cancelled")); self._append_console("CONFIG_BACKUP=CANCELLED", "system")
+            else:
+                self.backup_status.set(f"Backup: FAIL — {e}")
+                self._append_console(f"CONFIG_BACKUP=FAIL ERROR={e}", "error")
+                messagebox.showerror(self.t("error"), str(e), parent=self.root)
+
+        self._async(job, done, fail)
+
+    def _on_close(self):
+        try:
+            self._cancel_backup(); self._stop_logger(); self._persist_settings()
+        finally: self.root.destroy()
+
+
+def self_test() -> int:
+    p = "K2 Plus #1"
+    a = dt.datetime(2026, 9, 24, 21, 12, 34, 567000, tzinfo=dt.timezone(dt.timedelta(hours=5)))
+    b = a + dt.timedelta(seconds=10)
+    assert sanitize_name(p) == "K2_Plus_1"
+    assert default_log_name(p, a) == "log_K2_Plus_1_20260924_211234_567+0500.log"
+    assert default_snapshot_name(p, a, b) == "console_snapshot_K2_Plus_1_20260924_211234_567+0500_20260924_211244_567+0500.log"
+    assert default_backup_name(p, a) == "backup_K2_Plus_1_20260924_211234_567+0500.zip"
+    assert CONFIG_CANDIDATES[0] == CANONICAL_CONFIG_ROOT
+    assert validate_backup_root(CANONICAL_CONFIG_ROOT) == CANONICAL_CONFIG_ROOT
+    try:
+        validate_backup_root("../etc")
+        raise AssertionError("path traversal was not rejected")
+    except ValueError:
+        pass
+    try:
+        validate_backup_root("/mnt/UDISK/config\n/etc")
+        raise AssertionError("control characters were not rejected")
+    except ValueError:
+        pass
+    assert "host" not in sanitize_settings_for_save({"remember_connection": False, "host": "192.0.2.10", "ssh_user": "root"})
+    assert sanitize_settings_for_save({"remember_connection": True, "host": "192.0.2.10"})["host"] == "192.0.2.10"
+    assert record_text({"message": "hello"}) == "hello"
+    assert extract_store({"result": {"gcode_store": [{"message": "ok"}]}})[0]["message"] == "ok"
+    assert "busybox tar" in make_tar_command(CANONICAL_CONFIG_ROOT)
+    assert _safe_tar_member_relative("config/sub/x.cfg", "config") == "sub/x.cfg"
+    try:
+        _safe_tar_member_relative("../etc/passwd", "config")
+        raise AssertionError("unsafe TAR member was not rejected")
+    except RuntimeError:
+        pass
+
+    # Backup regression: TAR stream -> ZIP -> manifest -> atomic finalization.
+    import io, tempfile
+    tar_bytes = io.BytesIO()
+    with tarfile.open(fileobj=tar_bytes, mode="w") as tf:
+        for name, data in (("config/printer.cfg", b"[printer]\n"), ("config/sub/x.cfg", b"x=1\n")):
+            info = tarfile.TarInfo(name=name); info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        sym = tarfile.TarInfo(name="config/link.cfg"); sym.type = tarfile.SYMTYPE; sym.linkname = "printer.cfg"
+        tf.addfile(sym)
+    tar_payload = tar_bytes.getvalue()
+    class _FakeChannel:
+        def __init__(self, data: bytes): self.data=data; self.pos=0
+        def recv_ready(self): return self.pos < len(self.data)
+        def recv(self, n):
+            out=self.data[self.pos:self.pos+n]; self.pos += len(out); return out
+        def recv_stderr_ready(self): return False
+        def recv_stderr(self, n): return b""
+        def exit_status_ready(self): return self.pos >= len(self.data)
+        def recv_exit_status(self): return 0
+    with tempfile.TemporaryDirectory() as td:
+        final = Path(td) / "b.zip"; partial = Path(str(final) + ".partial")
+        estimate = {"files": 2, "dirs": 2, "bytes_estimate": 4096}
+        fake = _FakeChannel(tar_payload); reader = SSHChannelReader(fake, threading.Event(), idle_timeout=1.0)
+        res = create_config_backup_from_tar(reader, CANONICAL_CONFIG_ROOT, partial, "K2_Plus", threading.Event(), estimate)
+        rc, stderr = wait_ssh_channel_exit(fake, threading.Event(), reader, 1.0)
+        assert rc == 0 and stderr == ""
+        assert partial.is_file() and not final.exists() and res["files"] == 2 and res["symlinks"] == 1
+        verify_and_finalize_backup(partial, final)
+        assert final.is_file() and not partial.exists()
+        with zipfile.ZipFile(final) as z:
+            assert set(z.namelist()) >= {"config/printer.cfg", "config/sub/x.cfg", "FDM_AI_LAB_BACKUP_MANIFEST.json"}
+            manifest = json.loads(z.read("FDM_AI_LAB_BACKUP_MANIFEST.json").decode("utf-8"))
+            assert manifest["transport"] == "ssh_tar_stream"
+
+    # Cancel regression: TAR consumer must abort immediately before writing final ZIP.
+    cancel = threading.Event(); cancel.set()
+    with tempfile.TemporaryDirectory() as td:
+        partial = Path(td) / "cancel.zip.partial"
+        try:
+            create_config_backup_from_tar(io.BytesIO(b""), CANONICAL_CONFIG_ROOT, partial, "K2_Plus", cancel)
+            raise AssertionError("pre-cancelled backup did not abort")
+        except BackupCancelled:
+            pass
+        assert not partial.exists()
+
+    print(f"SELF_TEST=PASS VERSION={VERSION} CONFIG_ROOT={CANONICAL_CONFIG_ROOT} BACKUP_TRANSPORT=SSH_TAR SFTP_BACKUP=REMOVED CANCEL_REGRESSION=PASS BACKUP_ATOMIC=PASS PRIVACY_MIGRATION=PASS SAFETY_LIMITS=PASS")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+    if args.self_test: return self_test()
+    if ctk is None:
+        print("customtkinter is required", file=sys.stderr); return 2
+    ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("blue")
+    root = ctk.CTk(); App(root); root.mainloop(); return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
