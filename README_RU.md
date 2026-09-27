@@ -1,35 +1,215 @@
-# Creality K2 Plus Console Logger by FDM AI Lab — V2.3.0
+# Creality K2 Plus Console Logger
 
-Standalone Windows GUI logger for Creality K2 Plus / Moonraker.
+**FDM AI Lab · Руководство пользователя — RU · Version 2.3.0**
 
-## Возможности
+> **Назначение документа**  
+> Руководство рассчитано на обычных и продвинутых пользователей. Для штатной работы рекомендуется готовый Windows EXE. Исходный Python-код публикуется отдельно для аудита и разработки; внутренний блок компиляции в публичный пакет не входит.
 
-- RU / EN interface;
-- Moonraker + SSH connection test;
-- live Moonraker `gcode_store` console logger;
-- log and console snapshot export;
-- configuration Backup of `/mnt/UDISK/printer_data/config` through regular SSH TAR streaming;
-- Pause / Resume through Moonraker;
-- RSA-3072 SSH key generation and public-key installation;
-- privacy-safe connection persistence: host/SSH state is remembered only after explicit opt-in; password is never persisted.
+# 1. Что делает программа
 
-## V2.3.0 Backup
+Creality K2 Plus Console Logger by FDM AI Lab — самостоятельная Windows GUI-утилита для работы с Creality K2 Plus через Moonraker и SSH. Она объединяет журнал консоли, сохранение логов и снимков, проверку связи, резервное копирование конфигурации, управление Pause/Resume и работу с SSH-ключами.
 
-SFTP is not used.
+- Live-журнал сообщений Moonraker `gcode_store` с записью в локальный `.log`.
+- Русский и English интерфейс.
+- Проверка Moonraker и обычного SSH независимо друг от друга.
+- ZIP Backup каталога `/mnt/UDISK/printer_data/config` по обычному SSH TAR-stream, без SFTP.
+- Генерация RSA-3072 SSH-ключа и установка public key на принтер.
+- Pause / Resume текущей печати через Moonraker REST.
+- Автоматические имена файлов с именем принтера и полным локальным timestamp.
 
-`SSH → config-root check → find/du inventory → remote TAR stream → local ZIP → ZIP verify → atomic rename`
+> **Безопасность**  
+> Логирование и Backup читают данные. Установка public key изменяет `~/.ssh/authorized_keys`, а Pause/Resume изменяет состояние печати. Эти действия выполняются только после явного нажатия пользователя.
 
-Backup is read-only on the printer. The resulting ZIP may contain sensitive printer configuration and must be kept private unless separately sanitized.
+# 2. Перед первым запуском
 
-## Distribution
+| **Параметр**   | **Значение по умолчанию**      | **Комментарий**                                                            |
+|----------------|--------------------------------|----------------------------------------------------------------------------|
+| Имя принтера   | K2_Plus                        | Используется в именах файлов.                                              |
+| IP / hostname  | пусто                          | Введите адрес своего K2 Plus.                                              |
+| Moonraker порт | 7125                           | Стандартный порт API в текущем контуре проекта.                            |
+| SSH порт       | 22                             | Стандартный SSH.                                                           |
+| SSH login      | root                           | Vendor/default значение по требованиям проекта.                            |
+| SSH password   | creality_2024                  | Vendor/default значение; можно заменить. Пароль не сохраняется в settings. |
+| Config path    | /mnt/UDISK/printer_data/config | Канонический config root для K2 Plus.                                      |
 
-The public repository contains Python source and documentation. The Windows EXE is published as a release asset.
+Если используется ключ SSH, укажите private key в соответствующем поле. Если поле ключа пустое, применяется парольная аутентификация.
 
-The internal build/compilation block is intentionally not part of the public repository.
+> **Приватность подключения**  
+> Флажок «Запомнить подключение» по умолчанию выключен. Пока он выключен, IP/hostname, SSH user, порты и путь к ключу не переносятся скрыто между запусками. Пароль не сохраняется в любом режиме.
 
-See:
-- `docs/K2_Plus_Console_Logger_Manual_RU_V2.3.0.docx`
-- `docs/K2_Plus_Console_Logger_Manual_EN_V2.3.0.docx`
-- `SECURITY.md`
-- `CHANGELOG.md`
-- `THIRD_PARTY_NOTICES.md`
+# 3. Вкладка «Основное»
+
+## 3.1. Подключение
+
+1.  Введите имя принтера. Оно влияет только на автоматически формируемые локальные имена файлов.
+
+2.  Введите IP или hostname принтера.
+
+3.  Проверьте Moonraker port и SSH port.
+
+4.  Оставьте `root / creality_2024` либо введите собственные SSH credentials.
+
+5.  При необходимости выберите private SSH key.
+
+6.  Нажмите «Тест связи».
+
+Успешный тест должен отдельно показать `Moonraker: PASS` и `SSH: PASS`. Ошибка одного канала не означает автоматически ошибку другого.
+
+> **Если Moonraker PASS, а SSH FAIL**  
+> Проверьте SSH port, login/password или private key. Журнал Moonraker может работать без SSH, но Backup и установка ключа требуют SSH.
+
+## 3.2. Логирование консоли
+
+7.  Выберите папку логов.
+
+8.  Оставьте автоимя или задайте имя вручную.
+
+9.  Нажмите «Старт Logger».
+
+10. Откройте вкладку «Журнал» для просмотра накопленной консоли.
+
+11. Нажмите «Стоп Logger» после завершения диагностики.
+
+Logger опрашивает Moonraker и записывает новые сообщения `gcode_store`, избегая повторной записи уже увиденных элементов.
+
+`log_K2_Plus_20260925_010205_044+0500.log`
+
+Полный timestamp включает дату, время, миллисекунды и локальное смещение часового пояса.
+
+## 3.3. Pause / Resume
+
+Одна кнопка работает контекстно. Программа запрашивает `print_stats.state` у Moonraker:
+
+- `printing` → предлагается подтверждение Pause;
+- `paused` → предлагается подтверждение Resume;
+- другое состояние → команда не отправляется.
+
+> **Операция управления принтером**  
+> Перед Pause или Resume программа просит подтверждение. Используйте только когда понимаете текущее состояние печати.
+
+## 3.4. Backup конфигурации
+
+V2.3.0 не использует SFTP. Backup выполняется через обычный SSH exec-channel и TAR-stream, что обходит зависание SFTP subsystem на K2 Plus.
+
+12. Выберите локальную папку Backup.
+
+13. Оставьте `Config path = /mnt/UDISK/printer_data/config`, если ваша конфигурация находится в каноническом месте.
+
+14. Нажмите «Создать ZIP Backup» и подтвердите предупреждение о чувствительных данных.
+
+15. Следите за стадиями и progress bar.
+
+16. После PASS будет создан обычный ZIP. До проверки используется временный файл `.zip.partial`.
+
+SSH → config-root check → find/du inventory → TAR over SSH → local ZIP → ZIP verify → atomic rename
+
+| **Стадия**             | **Что происходит**                                                                       |
+|------------------------|------------------------------------------------------------------------------------------|
+| SSH подключение        | Создаётся обычная SSH-сессия.                                                            |
+| Проверка config root   | Проверяется существование выбранного каталога.                                           |
+| Оценка файлов и объёма | `find`/`du` оценивают число файлов, каталогов и размер.                              |
+| Передача TAR по SSH    | Удалённый `tar` или `busybox tar` читает config и отдаёт поток stdout.               |
+| Создание ZIP           | Локально TAR безопасно разбирается и записывается в ZIP.                                 |
+| Проверка ZIP           | Проверяется целостность ZIP и manifest; затем `.partial` атомарно становится `.zip`. |
+
+Safety limits: максимум 5000 файлов, 1000 каталогов и 64 MiB исходных данных. Absolute/traversal TAR paths блокируются; symlink не разыменовываются.
+
+> **Backup может содержать секреты**  
+> В `printer_data/config` могут находиться пароли, сетевые параметры, ключи и другие чувствительные данные. Не публикуйте Backup без отдельной очистки.
+
+Кнопка «Отмена» закрывает активный SSH channel/client, освобождает GUI и не позволяет callback старой Backup-сессии испортить следующий запуск.
+
+## 3.5. SSH-ключ
+
+17. Выберите папку ключа и имя.
+
+18. «Сгенерировать ключ» создаёт локальную пару RSA-3072.
+
+19. «Сгенерировать + установить» после подтверждения добавляет public key в `~/.ssh/authorized_keys` на принтере и проверяет вход по новому private key.
+
+20. «Установить public key» использует уже существующую пару: выбранный private key и соседний файл `<private>.pub`.
+
+> **Важно**  
+> Private key остаётся локально. Программа устанавливает только public key. Установка public key — запись на принтер и требует явного подтверждения.
+
+# 4. Вкладка «Журнал»
+
+Вкладка показывает накопленное состояние консоли текущей сессии. Доступны:
+
+- копирование выделенного текста;
+- копирование всего содержимого;
+- сохранение текущего накопленного состояния в отдельный snapshot-файл;
+- очистка экрана без удаления уже сохранённого основного log-файла.
+
+`console_snapshot_K2_Plus_20260925_010205_044+0500_20260925_011530_212+0500.log`
+
+В имени snapshot первый timestamp — начало накопления текущей консоли, второй — момент сохранения snapshot.
+
+# 5. Автоматические имена файлов
+
+| **Тип**      | **Шаблон**                                                                    |
+|--------------|-------------------------------------------------------------------------------|
+| Основной лог | `log_<printer>_<full_timestamp>.log`                                  |
+| Snapshot     | `console_snapshot_<printer>_<start_timestamp>_<end_timestamp>.log` |
+| Backup       | `backup_<printer>_<full_timestamp>.zip`                               |
+
+Имя принтера нормализуется: пробелы и специальные символы заменяются безопасными символами для имени файла.
+
+# 6. Что сохраняется между запусками
+
+Настройки находятся в `%LOCALAPPDATA%\FDM_AI_Lab\K2_Plus_Console_Logger\settings.json`.
+
+| **Данные**                                                 | **Сохраняются?**                             |
+|------------------------------------------------------------|----------------------------------------------|
+| Язык, имя принтера, папки логов/Backup/ключей, config path | Да                                           |
+| IP/hostname, Moonraker/SSH ports, SSH user, key path       | Только если включено «Запомнить подключение» |
+| SSH password                                               | Нет                                          |
+| Содержимое журналов                                        | Только в выбранных log/snapshot файлах       |
+
+# 7. Диагностика
+
+| **Симптом**                   | **Что проверить**                                                                                                     |
+|-------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| Moonraker FAIL                | IP/hostname, порт 7125, сеть, доступность Moonraker.                                                                  |
+| SSH FAIL                      | Порт 22, login/password, private key, SSH-доступ на принтере.                                                         |
+| Backup: config root not found | Путь `/mnt/UDISK/printer_data/config` или вручную заданный абсолютный remote path.                                  |
+| Backup завис/timeout          | Смотрите текущую стадию; Cancel должен закрыть активный channel. Проверьте обычный SSH и наличие `tar`/`busybox`. |
+| Public key install FAIL       | Проверьте password-auth, доступ на запись в `~/.ssh`, наличие `.pub` рядом с private key.                         |
+| Pause/Resume не выполняется   | Проверьте `print_stats.state`: команда применяется только к `printing` или `paused`.                            |
+
+# 8. Для продвинутых пользователей
+
+## 8.1. Сетевые интерфейсы
+
+- Moonraker REST используется для connection test, `gcode_store` logger и Pause/Resume.
+- Обычный SSH используется для connection test, Backup и установки public key.
+- SFTP в Backup V2.3.0 не используется.
+
+## 8.2. Backup security model
+
+Remote side выполняет только read-only проверку каталога, `find`/`du` и `tar -cf -`. Поток TAR не сохраняется на принтере. Локальная сторона проверяет имена TAR members и не допускает absolute path или `..`; regular files попадают в `config/…`, symlink фиксируются в manifest, но не разыменовываются.
+
+## 8.3. Публичный исходный код
+
+Python source публикуется для аудита и разработки. Для обычного пользователя предназначен готовый EXE. В публичный GitHub-пакет проекта намеренно не входит внутренний build/compilation block.
+
+> **Статус аппаратной проверки**  
+> Документация описывает V2.3.0. Перед пометкой конкретной функции как hardware-proven её необходимо проверить на целевом K2 Plus. Не путайте source self-tests с физическим acceptance.
+
+# 9. Краткий сценарий работы
+
+1. Запустите EXE.
+
+2. Введите IP K2 Plus и нажмите «Тест связи».
+
+3. Убедитесь, что нужные каналы дают PASS.
+
+4. Выберите папку логов и запустите Logger.
+
+5. Воспроизведите нужное событие/печать.
+
+6. При необходимости сохраните snapshot из вкладки «Журнал».
+
+7. Для приватного резервного копирования выполните ZIP Backup.
+
+8. Остановите Logger и сохраните полученные файлы.
