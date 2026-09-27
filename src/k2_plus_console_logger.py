@@ -899,3 +899,103 @@ class App:
                            "config_path": self.config_path.get(), "key_folder": self.key_folder.get(), "key_name": self.key_name.get()})
         except Exception:
             pass
+
+    def _validate_host(self):
+        if not self.host.get().strip():
+            messagebox.showerror(self.t("error"), "IP / hostname is empty", parent=self.root); return False
+        return True
+
+    def _async(self, func: Callable[[], Any], ok: Callable[[Any], None] | None = None, err: Callable[[Exception], None] | None = None):
+        def worker():
+            try:
+                result = func(); self.root.after(0, lambda: ok(result) if ok else None)
+            except Exception as e:
+                self.root.after(0, lambda: err(e) if err else messagebox.showerror(self.t("error"), str(e), parent=self.root))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_busy(self, text: str):
+        self.footer_status.set(text)
+        try: self.global_progress.start()
+        except Exception: pass
+
+    def _stop_busy(self):
+        try: self.global_progress.stop(); self.global_progress.set(0)
+        except Exception: pass
+        self.footer_status.set(self.t("status_ready"))
+
+    def _test_connection(self):
+        if not self._validate_host(): return
+        self._persist_settings(); self._start_busy("Testing…")
+        def job():
+            out = {}
+            try: out["moonraker"] = http_json(self.host.get(), int(self.moonraker_port.get()), "/printer/info")
+            except Exception as e: out["moonraker"] = e
+            try:
+                if paramiko is None: raise RuntimeError(self.t("paramiko_missing"))
+                c = ssh_connect(self.host.get(), int(self.ssh_port.get()), self.ssh_user.get(), self.ssh_password.get(), self.key_path.get())
+                try:
+                    rc, stdout, stderr = ssh_exec_text(c, "printf FDM_AI_LAB_SSH_OK")
+                    if rc != 0 or "FDM_AI_LAB_SSH_OK" not in stdout: raise RuntimeError(stderr or "SSH probe failed")
+                    out["ssh"] = stdout
+                finally: c.close()
+            except Exception as e: out["ssh"] = e
+            return out
+        def done(out):
+            if isinstance(out["moonraker"], Exception):
+                self.moonraker_status.set(self.t("connection_fail")); self._append_console(f"Moonraker FAIL: {out['moonraker']}", "error")
+            else:
+                self.moonraker_status.set(self.t("connection_ok")); self._append_console("Moonraker connection PASS", "system")
+            if isinstance(out["ssh"], Exception):
+                self.ssh_status.set(self.t("ssh_fail")); self._append_console(f"SSH FAIL: {out['ssh']}", "error")
+            else:
+                self.ssh_status.set(self.t("ssh_ok")); self._append_console("SSH connection PASS", "system")
+            self._stop_busy()
+        self._async(job, done, lambda e: (self._stop_busy(), messagebox.showerror(self.t("error"), str(e), parent=self.root)))
+
+    def _start_logger(self):
+        if not self._validate_host() or (self.logger_thread and self.logger_thread.is_alive()): return
+        folder = Path(self.log_folder.get()).expanduser()
+        if self.log_name.get() == self._last_auto_log_name: self._refresh_auto_log_name(True)
+        name = self.log_name.get().strip() or default_log_name(self.printer_name.get())
+        if not name.lower().endswith(".log"): name += ".log"; self.log_name.set(name)
+        try: folder.mkdir(parents=True, exist_ok=True)
+        except Exception as e: messagebox.showerror(self.t("error"), str(e), parent=self.root); return
+        output = folder / name
+        self.logger_stop = threading.Event(); self.log_started_at = now_local(); self.console_started_at = self.log_started_at
+        self.logger_thread = ConsoleLoggerThread(self.host.get(), int(self.moonraker_port.get()), output, self.ui_queue, self.logger_stop)
+        self.logger_thread.start(); self.start_btn.configure(state="disabled"); self.stop_btn.configure(state="normal")
+        self.logger_status.set(self.t("logger_running")); self.footer_status.set(f"{self.t('logger_file')}: {output}")
+        self._append_console(f"LOG_FILE={output}", "system"); self._persist_settings()
+
+    def _stop_logger(self):
+        if self.logger_thread and self.logger_thread.is_alive():
+            self.logger_stop.set(); self.logger_thread.join(timeout=2.5)
+        if hasattr(self, "start_btn"):
+            self.start_btn.configure(state="normal"); self.stop_btn.configure(state="disabled")
+            self.logger_status.set(self.t("logger_stopped"))
+
+    def _append_console(self, text: str, kind="console"):
+        ts = now_local().isoformat()
+        line = text if re.match(r"^\d{4}-\d{2}-\d{2}T", text) else f"{ts}  {text}"
+        self.console.insert("end", line + "\n"); self.console.see("end")
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                item = self.ui_queue.get_nowait()
+                if item[0] == "console": self._append_console(item[2], item[1])
+                elif item[0] == "backup_progress": self._render_backup_progress(item[1])
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_ui_queue)
+
+    def _copy_selected(self):
+        try: text = self.console.get("sel.first", "sel.last")
+        except tk.TclError: text = ""
+        if text: self.root.clipboard_clear(); self.root.clipboard_append(text)
+
+    def _copy_all(self):
+        text = self.console.get("1.0", "end-1c"); self.root.clipboard_clear(); self.root.clipboard_append(text)
+
+    def _save_snapshot(self):
+        start, end = self.console_started_at, now_local()
