@@ -1099,3 +1099,103 @@ class App:
         # Invalidate callbacks from the old worker so a new Backup cannot be
         # corrupted if Paramiko needs extra time to unwind locally.
         self.backup_run_id += 1
+        channel, client = self.backup_channel, self.backup_client
+        self.backup_channel = None; self.backup_client = None
+        try:
+            if channel is not None:
+                channel.close()
+        except Exception:
+            pass
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
+        self.backup_progress.set(0)
+        self.backup_status.set(self.t("backup_cancelled"))
+        self._append_console("CONFIG_BACKUP=CANCELLED", "system")
+        self._release_backup_ui()
+
+    def _backup_config(self):
+        if paramiko is None:
+            messagebox.showerror(self.t("error"), self.t("paramiko_missing"), parent=self.root); return
+        if self.backup_running or not self._validate_host():
+            return
+        if not messagebox.askyesno(self.t("warning"), self.t("backup_warning"), parent=self.root):
+            return
+        out_dir = Path(self.backup_folder.get()).expanduser(); out_dir.mkdir(parents=True, exist_ok=True)
+        out_zip = out_dir / default_backup_name(self.printer_name.get()); partial = Path(str(out_zip) + ".partial")
+        cancel_event = threading.Event()
+        self.backup_cancel = cancel_event
+        self.backup_run_id += 1
+        run_id = self.backup_run_id
+        self.backup_running = True; self.backup_progress.set(0)
+        self.backup_btn.configure(state="disabled"); self.cancel_backup_btn.configure(state="normal")
+        self.backup_status.set(self.t("backup_stage_ssh")); self._start_busy(self.t("backup_stage_ssh"))
+        self._persist_settings()
+
+        def progress(payload):
+            self.ui_queue.put(("backup_progress", payload))
+
+        def register_channel(channel):
+            # Worker thread assignment only; Tk is never touched here.
+            if run_id == self.backup_run_id:
+                self.backup_channel = channel
+
+        def job():
+            progress({"phase": "stage", "stage": "ssh"})
+            if cancel_event.is_set():
+                raise BackupCancelled("Backup cancelled")
+            client = ssh_connect(self.host.get(), int(self.ssh_port.get()), self.ssh_user.get(),
+                                 self.ssh_password.get(), self.key_path.get(), timeout=SSH_IO_TIMEOUT)
+            if run_id == self.backup_run_id:
+                self.backup_client = client
+            try:
+                if cancel_event.is_set():
+                    raise BackupCancelled("Backup cancelled")
+                progress({"phase": "stage", "stage": "root", "root": self.config_path.get() or CANONICAL_CONFIG_ROOT})
+                root = detect_config_root_ssh(client, self.config_path.get(), cancel_event, register_channel)
+                progress({"phase": "stage", "stage": "inventory", "root": root})
+                estimate = ssh_backup_inventory(client, root, cancel_event, register_channel)
+                progress({"phase": "inventory", **estimate, "root": root})
+                if cancel_event.is_set():
+                    raise BackupCancelled("Backup cancelled")
+
+                progress({"phase": "stage", "stage": "stream", "root": root})
+                transport = client.get_transport()
+                if transport is None or not transport.is_active():
+                    raise RuntimeError("SSH transport is not active")
+                channel = transport.open_session(timeout=SSH_IO_TIMEOUT)
+                register_channel(channel)
+                reader = None
+                try:
+                    channel.settimeout(1.0)
+                    channel.exec_command(make_tar_command(root))
+                    reader = SSHChannelReader(channel, cancel_event, BACKUP_IDLE_TIMEOUT)
+                    progress({"phase": "stage", "stage": "zip", "root": root})
+                    res = create_config_backup_from_tar(reader, root, partial, self.printer_name.get(),
+                                                        cancel_event, estimate, progress)
+                    if cancel_event.is_set():
+                        raise BackupCancelled("Backup cancelled")
+                    # Wait for a real remote exit-status without an unbounded
+                    # recv_exit_status() wait. Cancel and idle timeout remain active.
+                    rc, stderr = wait_ssh_channel_exit(channel, cancel_event, reader, BACKUP_IDLE_TIMEOUT)
+                    if rc != 0:
+                        raise RuntimeError(stderr or f"Remote tar failed with exit code {rc}")
+                    verify_and_finalize_backup(partial, out_zip, progress)
+                    res["output"] = str(out_zip)
+                    return res
+                finally:
+                    try: channel.close()
+                    except Exception: pass
+                    register_channel(None)
+            finally:
+                if run_id == self.backup_run_id:
+                    self.backup_client = None; self.backup_channel = None
+                try: client.close()
+                except Exception: pass
+
+        def finish_ui() -> bool:
+            if run_id != self.backup_run_id:
+                return False
+            self.backup_client = None; self.backup_channel = None
