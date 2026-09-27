@@ -799,3 +799,103 @@ class App:
         self._bindings += [(self.backup_btn, "create_backup"), (self.cancel_backup_btn, "cancel_backup")]
 
         keys = self._section(self.main_tab, 3, 1, "ssh_keys")
+        self._field(keys, 1, "key_folder", self.key_folder, browse=self._browse_key_folder)
+        self._field(keys, 2, "key_name", self.key_name)
+        kr = ctk.CTkFrame(keys, fg_color="transparent")
+        kr.grid(row=3, column=0, columnspan=3, padx=12, pady=(8, 12), sticky="ew")
+        k1 = ctk.CTkButton(kr, text="", fg_color="#555555", hover_color="#666666", command=self._generate_key)
+        k2 = ctk.CTkButton(kr, text="", command=lambda: self._generate_key(install=True))
+        k3 = ctk.CTkButton(kr, text="", fg_color="#555555", hover_color="#666666", command=self._install_existing_public_key)
+        k1.pack(side="left", fill="x", expand=True)
+        k2.pack(side="left", fill="x", expand=True, padx=6)
+        k3.pack(side="left", fill="x", expand=True)
+        self._bindings += [(k1, "generate_key"), (k2, "generate_install_key"), (k3, "install_existing_key")]
+        self.printer_name.trace_add("write", lambda *_: self._refresh_auto_log_name(False))
+
+    def _build_log_tab(self):
+        self.log_tab.grid_columnconfigure(0, weight=1)
+        self.log_tab.grid_rowconfigure(0, weight=1)
+        self.console = ctk.CTkTextbox(self.log_tab, wrap="none", font=("Cascadia Mono", 12))
+        self.console.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="nsew")
+        row = ctk.CTkFrame(self.log_tab, fg_color="transparent")
+        row.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        for key, cmd, primary in [
+            ("copy_selected", self._copy_selected, False), ("copy_all", self._copy_all, False),
+            ("save_snapshot", self._save_snapshot, True), ("clear_view", lambda: self.console.delete("1.0", "end"), False),
+        ]:
+            b = ctk.CTkButton(row, text="", command=cmd, fg_color=None if primary else "#555555", hover_color=None if primary else "#666666")
+            b.pack(side="left", padx=(0, 6))
+            self._bindings.append((b, key))
+
+    def _apply_language(self):
+        for widget, key in self._bindings:
+            try:
+                widget.configure(text=self.t(key))
+            except Exception:
+                pass
+        old = self.tabs.get()
+        canonical = "Основное" if old in ("Основное", "Main") else "Журнал"
+        names = [("Основное", self.t("tab_main")), ("Журнал", self.t("tab_log"))]
+        for ru, new in names:
+            for current in (ru, I18N["en"]["tab_main"] if ru == "Основное" else I18N["en"]["tab_log"]):
+                if current != new:
+                    try:
+                        self.tabs.rename(current, new)
+                        break
+                    except Exception:
+                        pass
+        try:
+            self.tabs.set(self.t("tab_main") if canonical == "Основное" else self.t("tab_log"))
+        except Exception:
+            pass
+        self.lang_label.configure(text=self.t("language"))
+        self.lang_menu.set("Русский" if self.lang.get() == "ru" else "English")
+        self.moonraker_status.set(self.t("moonraker_state"))
+        self.ssh_status.set(self.t("ssh_state"))
+        self.logger_status.set(self.t("logger_running") if self.logger_thread and self.logger_thread.is_alive() else self.t("logger_stopped"))
+        if not self.backup_running:
+            self.backup_status.set(self.t("backup_idle"))
+        self.footer_status.set(self.t("status_ready"))
+
+    def _change_language(self, label: str):
+        self.lang.set("ru" if label == "Русский" else "en")
+        self._apply_language()
+        self._persist_settings()
+
+    def _toggle_password(self):
+        self.password_entry.configure(show="" if self.show_password.get() else "•")
+
+    def _on_remember_connection_changed(self):
+        self._persist_settings()
+        if not self.remember_connection.get():
+            self._append_console("CONNECTION_STATE_PERSISTENCE=OFF", "system")
+
+    def _browse_dir(self, key: str, var: tk.StringVar):
+        p = filedialog.askdirectory(title=self.t(key), initialdir=var.get() or str(Path.home()), parent=self.root)
+        if p:
+            var.set(p); self._persist_settings()
+
+    def _browse_log_folder(self): self._browse_dir("select_log_folder", self.log_folder)
+    def _browse_backup_folder(self): self._browse_dir("select_backup_folder", self.backup_folder)
+    def _browse_key_folder(self): self._browse_dir("select_key_folder", self.key_folder)
+
+    def _browse_private_key(self):
+        p = filedialog.askopenfilename(title=self.t("select_private_key"), initialdir=str(Path(self.key_folder.get()).expanduser()), parent=self.root)
+        if p:
+            self.key_path.set(p); self._persist_settings()
+
+    def _refresh_auto_log_name(self, force=False):
+        new = default_log_name(self.printer_name.get())
+        if force or not self.log_name.get() or self.log_name.get() == self._last_auto_log_name:
+            self.log_name.set(new); self._last_auto_log_name = new
+
+    def _persist_settings(self):
+        try:
+            save_settings({"language": self.lang.get(), "printer_name": self.printer_name.get(),
+                           "remember_connection": bool(self.remember_connection.get()), "host": self.host.get(),
+                           "moonraker_port": int(self.moonraker_port.get() or DEFAULT_MOONRAKER_PORT),
+                           "ssh_port": int(self.ssh_port.get() or DEFAULT_SSH_PORT), "ssh_user": self.ssh_user.get(),
+                           "key_path": self.key_path.get(), "log_folder": self.log_folder.get(), "backup_folder": self.backup_folder.get(),
+                           "config_path": self.config_path.get(), "key_folder": self.key_folder.get(), "key_name": self.key_name.get()})
+        except Exception:
+            pass
