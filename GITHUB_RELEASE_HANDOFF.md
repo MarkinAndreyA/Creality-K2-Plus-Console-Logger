@@ -7,7 +7,11 @@ Publish the Python source and Markdown documentation as the source/documentation
 The Python source is intentionally public:
 - `src/k2_plus_console_logger.py`
 
-Word/DOCX manuals are source preparation materials and are **not** part of the GitHub publication scope.
+The two user manuals are published as Markdown:
+- `README_RU.md`
+- `README_ENG.md`
+
+The original Word/DOCX manuals are preparation sources and are **not** part of the GitHub publication scope.
 
 The compiled Windows EXE is intentionally distributed as a GitHub Release asset and must be supplied separately by the user:
 - `K2PlusConsoleLogger.exe`
@@ -55,7 +59,8 @@ Configuration Backup archives are private by default because printer config can 
 
 Do not describe target-hardware behavior as PROVEN unless it was explicitly verified on the target K2 Plus. Source self-tests and static QA are not physical hardware acceptance.
 
-## License
+## Project license decision
 
-No license has been selected in this transfer package.
-Do not invent or add a license without an explicit user decision before public publication.
+Owner decision for V2.3.0: **No project LICENSE**.
+
+Do not create a `LICENSE` file or assign a project-wide open-source license unless the owner separately changes this decision. Third-party software remains governed by its own license terms.
