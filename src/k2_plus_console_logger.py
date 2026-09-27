@@ -336,10 +336,10 @@ def ssh_backup_inventory(client, root: str, cancel: threading.Event,
     q = shlex.quote(root)
     cmd = (
         f"root={q}; "
-        "files=$(find "$root" -type f 2>/dev/null | wc -l); "
-        "dirs=$(find "$root" -type d 2>/dev/null | wc -l); "
-        "kb=$(du -sk "$root" 2>/dev/null | awk '{print $1}'); "
-        "printf '%s|%s|%s\n' "$files" "$dirs" "$kb""
+        "files=$(find \"$root\" -type f 2>/dev/null | wc -l); "
+        "dirs=$(find \"$root\" -type d 2>/dev/null | wc -l); "
+        "kb=$(du -sk \"$root\" 2>/dev/null | awk '{print $1}'); "
+        "printf '%s|%s|%s\\n' \"$files\" \"$dirs\" \"$kb\""
     )
     rc, out, err = ssh_exec_text_cancelable(client, cmd, cancel, register)
     if rc != 0:
