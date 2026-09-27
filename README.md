@@ -23,16 +23,13 @@ Backup is read-only on the printer. The resulting ZIP may contain sensitive prin
 
 ## Distribution
 
-The public repository contains Python source and documentation. The Windows EXE is published as a release asset.
+The public repository contains Python source and Markdown documentation. The Windows EXE is published as a release asset.
 
 The internal build/compilation block is intentionally not part of the public repository.
 
-See:
-- `docs/K2_Plus_Console_Logger_Manual_RU_V2.3.0.docx`
-- `docs/K2_Plus_Console_Logger_Manual_EN_V2.3.0.docx`
-- `SECURITY.md`
-- `CHANGELOG.md`
-
-
-Russian documentation: `README_RU.md`.
-- `THIRD_PARTY_NOTICES.md`
+Documentation:
+- `README_RU.md` — Russian;
+- `README_EN.md` — English;
+- `SECURITY.md`;
+- `CHANGELOG.md`;
+- `THIRD_PARTY_NOTICES.md`.
