@@ -257,17 +257,15 @@ def ssh_exec_text(client, command: str, timeout: float = 10.0) -> tuple[int, str
 
 
 def validate_backup_root(root: str) -> str:
-    root = (root or "").strip().replace("\", "/")
+    root = (root or "").strip().replace("\\", "/")
     if not root.startswith("/"):
         raise ValueError("Config path must be an absolute remote path")
-    if any(ch in root for ch in (" ", "
-", "")):
+    if any(ch in root for ch in ("\x00", "\n", "\r")):
         raise ValueError("Config path contains unsupported control characters")
     parts = [x for x in root.split("/") if x]
     if any(x in (".", "..") for x in parts):
         raise ValueError("Config path traversal is not allowed")
     return "/" + "/".join(parts)
-
 
 class BackupCancelled(RuntimeError):
     pass
