@@ -1,0 +1,25 @@
+PUBLIC RELEASE MATERIALS — V2.3.0
+
+INCLUDED
+src/k2_plus_console_logger.py
+docs/K2_Plus_Console_Logger_Manual_RU_V2.3.0.docx
+docs/K2_Plus_Console_Logger_Manual_EN_V2.3.0.docx
+README.md
+README_RU.md
+README_EN.md
+SECURITY.md
+THIRD_PARTY_NOTICES.md
+CHANGELOG.md
+RELEASE_NOTES_V2.3.0.md
+GITHUB_RELEASE_HANDOFF.md
+requirements.txt
+settings.example.json
+.gitignore
+
+NOT INCLUDED BY POLICY
+BUILD_ONEFILE_WINDOWS.cmd
+RUN_SOURCE.cmd
+PyInstaller build/spec files
+build logs/evidence
+real settings/logs/backups/SSH keys
+compiled EXE (must be supplied separately by the user as K2PlusConsoleLogger.exe)
