@@ -1,0 +1,13 @@
+.build-venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+settings.json
+*.log
+*.zip
+*.partial
+*.key
+*.pem
+id_rsa*
