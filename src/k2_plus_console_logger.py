@@ -267,6 +267,7 @@ def validate_backup_root(root: str) -> str:
         raise ValueError("Config path traversal is not allowed")
     return "/" + "/".join(parts)
 
+
 class BackupCancelled(RuntimeError):
     pass
 
