@@ -4,7 +4,7 @@ INCLUDED
 src/k2_plus_console_logger.py
 README.md
 README_RU.md
-README_EN.md
+README_ENG.md
 SECURITY.md
 THIRD_PARTY_NOTICES.md
 CHANGELOG.md
@@ -15,8 +15,10 @@ settings.example.json
 .gitignore
 
 NOT INCLUDED BY POLICY
+README_EN.md
 K2_Plus_Console_Logger_Manual_RU_V2.3.0.docx
 K2_Plus_Console_Logger_Manual_EN_V2.3.0.docx
+LICENSE
 BUILD_ONEFILE_WINDOWS.cmd
 RUN_SOURCE.cmd
 PyInstaller build/spec files
