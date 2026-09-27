@@ -999,3 +999,103 @@ class App:
 
     def _save_snapshot(self):
         start, end = self.console_started_at, now_local()
+        p = filedialog.asksaveasfilename(title=self.t("snapshot_title"), initialdir=self.log_folder.get() or str(Path.home()),
+            initialfile=default_snapshot_name(self.printer_name.get(), start, end), defaultextension=".log",
+            filetypes=[("Log", "*.log"), ("Text", "*.txt"), ("All", "*.*")], parent=self.root)
+        if p:
+            Path(p).write_text(self.console.get("1.0", "end-1c") + "\n", encoding="utf-8")
+            self.footer_status.set(f"{self.t('snapshot_done')}: {p}")
+
+    def _pause_resume(self):
+        if not self._validate_host(): return
+        try:
+            st = http_json(self.host.get(), int(self.moonraker_port.get()), "/printer/objects/query?print_stats")
+            state = str(st.get("result", {}).get("status", {}).get("print_stats", {}).get("state", "")).lower()
+            if state == "paused":
+                if not messagebox.askyesno(self.t("warning"), self.t("confirm_resume"), parent=self.root): return
+                http_json(self.host.get(), int(self.moonraker_port.get()), "/printer/print/resume", method="POST")
+                self._append_console("PRINTER_RESUME=REQUESTED", "system")
+            elif state == "printing":
+                if not messagebox.askyesno(self.t("warning"), self.t("confirm_pause"), parent=self.root): return
+                http_json(self.host.get(), int(self.moonraker_port.get()), "/printer/print/pause", method="POST")
+                self._append_console("PRINTER_PAUSE=REQUESTED", "system")
+            else: messagebox.showinfo(self.t("warning"), self.t("not_printing"), parent=self.root)
+        except Exception as e: messagebox.showerror(self.t("error"), str(e), parent=self.root)
+
+    def _generate_key(self, install=False):
+        if paramiko is None: messagebox.showerror(self.t("error"), self.t("paramiko_missing"), parent=self.root); return
+        private = Path(self.key_folder.get()).expanduser() / sanitize_name(self.key_name.get(), "fdm_ai_lab_k2_plus")
+        if private.exists(): messagebox.showerror(self.t("error"), f"File already exists: {private}", parent=self.root); return
+        try:
+            priv, pub = generate_rsa_key(private); self.key_path.set(str(priv)); self._persist_settings(); self._append_console(f"SSH_KEY_GENERATED={priv}", "system")
+            if not install: messagebox.showinfo(self.t("success"), f"{self.t('key_created')}\n{priv}\n{pub}", parent=self.root); return
+            if not self._validate_host() or not messagebox.askyesno(self.t("warning"), self.t("key_write_warning"), parent=self.root): return
+            self._install_key_files(priv, pub)
+        except Exception as e: messagebox.showerror(self.t("error"), str(e), parent=self.root)
+
+    def _install_key_files(self, private: Path, public: Path):
+        def job():
+            home = install_public_key(self.host.get(), int(self.ssh_port.get()), self.ssh_user.get(), self.ssh_password.get(), public)
+            c = ssh_connect(self.host.get(), int(self.ssh_port.get()), self.ssh_user.get(), "", str(private))
+            try:
+                rc, out, err = ssh_exec_text(c, "printf FDM_AI_LAB_KEY_OK")
+                if rc != 0 or "FDM_AI_LAB_KEY_OK" not in out: raise RuntimeError(err or "Key verification failed")
+            finally: c.close()
+            return home
+        def done(home):
+            self.key_path.set(str(private)); self._persist_settings(); self._append_console(f"SSH_KEY_INSTALL=PASS REMOTE_HOME={home}", "system")
+            messagebox.showinfo(self.t("success"), self.t("key_installed"), parent=self.root)
+        self._async(job, done)
+
+    def _install_existing_public_key(self):
+        if paramiko is None: messagebox.showerror(self.t("error"), self.t("paramiko_missing"), parent=self.root); return
+        priv = self.key_path.get().strip()
+        if not priv: self._browse_private_key(); priv = self.key_path.get().strip()
+        if not priv: return
+        private, public = Path(priv).expanduser(), Path(priv + ".pub")
+        if not public.exists(): messagebox.showerror(self.t("error"), f"Public key not found: {public}", parent=self.root); return
+        if self._validate_host() and messagebox.askyesno(self.t("warning"), self.t("key_write_warning"), parent=self.root): self._install_key_files(private, public)
+
+    def _render_backup_progress(self, p: dict[str, Any]):
+        phase = p.get("phase")
+        if phase == "stage":
+            stage = p.get("stage")
+            key = {"ssh": "backup_stage_ssh", "root": "backup_stage_root", "inventory": "backup_stage_inventory",
+                   "stream": "backup_stage_stream", "zip": "backup_stage_zip", "verify": "backup_stage_verify"}.get(stage, "backup_inventory")
+            if stage not in ("stream", "zip"):
+                self.backup_progress.set(0)
+            extra = f"  {p.get('root')}" if p.get("root") else ""
+            self.backup_status.set(self.t(key) + extra)
+            self.footer_status.set(self.t(key) + extra)
+        elif phase == "inventory":
+            files = int(p.get("files", 0)); dirs = int(p.get("dirs", 0)); total = int(p.get("bytes_estimate", 0))
+            self.backup_progress.set(0)
+            self.backup_status.set(f"{self.t('backup_inventory')}  {files} files / {dirs} dirs / ~{total / 1024:.1f} KiB")
+        elif phase == "copy":
+            copied, total = int(p.get("copied", 0)), int(p.get("bytes_total", 0))
+            ratio = (copied / total) if total > 0 else 0.0
+            self.backup_progress.set(max(0.0, min(1.0, ratio)))
+            file_count = int(p.get("file_count", 0)); idx = int(p.get("index", 0))
+            counter = f"{idx}/{file_count}" if file_count > 0 else str(idx)
+            if total > 0:
+                size_text = f"{copied / 1024:.1f}/~{total / 1024:.1f} KiB"
+            else:
+                size_text = f"{copied / 1024:.1f} KiB"
+            self.backup_status.set(f"{counter} · {p.get('file', '')} · {size_text}")
+
+    def _set_backup_channel(self, channel):
+        self.backup_channel = channel
+
+    def _release_backup_ui(self):
+        self.backup_running = False
+        self.backup_btn.configure(state="normal")
+        self.cancel_backup_btn.configure(state="disabled")
+        self._stop_busy()
+
+    def _cancel_backup(self):
+        if not self.backup_running:
+            return
+        self.backup_cancel.set()
+        # Invalidate callbacks from the old worker so a new Backup cannot be
+        # corrupted if Paramiko needs extra time to unwind locally.
+        self.backup_run_id += 1
