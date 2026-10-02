@@ -196,6 +196,17 @@ Python source is published for audit and development. The released EXE is intend
 > **Hardware acceptance**  
 > This guide documents V2.3.0 behavior. A function should only be marked hardware-proven after target K2 Plus validation. Source self-tests are not a substitute for physical acceptance.
 
+## 8.4. Known limitations — V2.3.0
+
+The current Logger implementation has known performance/scalability debt for long-running continuous sessions:
+
+- `/server/gcode_store?count=1000` is polled every 0.50 s;
+- the in-memory `seen` set is retained for the full logger session without a size limit;
+- the Log textbox also grows for the full session;
+- new lines are inserted into the GUI and scrolled individually.
+
+As the session grows, these unbounded structures and per-line GUI updates can increase memory/UI work. This limitation applies to the console-logger path and does not change the SSH TAR Backup workflow described above.
+
 # 9. Quick workflow
 
 1. Launch the EXE.
