@@ -21,6 +21,17 @@ SFTP is not used.
 
 Backup is read-only on the printer. The resulting ZIP may contain sensitive printer configuration and must be kept private unless separately sanitized.
 
+## Known limitations — V2.3.0
+
+Long-running console-logging sessions have known performance/scalability debt in the current implementation:
+
+- the logger polls `/server/gcode_store?count=1000` every 0.50 s;
+- each logger instance keeps an in-memory `seen` set for the full session without a retention limit;
+- the Log textbox also grows for the full session;
+- new console lines are inserted into the GUI and scrolled individually.
+
+Because these structures are unbounded and GUI updates are per-line, memory/UI work can grow with session length. This limitation affects the console-logger path; it does not change the SSH TAR Backup workflow described above.
+
 ## Documentation
 
 - [README_RU.md](README_RU.md) — полное руководство пользователя на русском;
